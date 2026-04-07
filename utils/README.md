@@ -24,11 +24,10 @@ In another terminal, start the mock MCU script, pointing it to the second port g
 ```bash
 python3 mock_tx.py -p <second socat port>-v -r 10
 ```
-*Options:*
-    - `-p, --port`: Serial port to transmit on
-    - `-b, --baud`: Baud rate (default: `115200`)
-    - `-r, --rate`: Transmission rate in Hertz (default: `10.0`)
-    - `-v, --verbose`: Verbose output
-    - `-d, --debug`: Enable logging (prints raw hex bytes)
 
-
+* *Options:*
+    * `-p, --port`: Serial port to transmit on
+    * `-b, --baud`: Baud rate (default: `115200`)
+    * `-r, --rate`: Transmission rate in Hertz (default: `10.0`)
+    * `-v, --verbose`: Verbose output
+    * `-d, --debug`: Enable logging (prints raw hex bytes)

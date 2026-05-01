@@ -1,13 +1,15 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, getContext } from 'svelte';
   import uPlot from 'uplot';
   import 'uplot/dist/uPlot.min.css';
   import { liveBuffer, MAX_POINTS } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
 
   export let channels = [];   // expects exactly 2 keys: [xKey, yKey]
-  export let width = 300;
+  export let width  = 300;
   export let height = 200;
+  export let live   = true;
+  export let data   = null;   // static: uPlot format [xs[], ys[]]
 
   const [xKey, yKey] = channels;
   const xMeta = CHANNELS[xKey] ?? {};
@@ -38,29 +40,43 @@
     ],
   });
 
+  function sortedPairs(xs, ys) {
+    const pairs = xs.map((x, i) => [x, ys[i]]).sort((a, b) => a[0] - b[0]);
+    return [pairs.map(p => p[0]), pairs.map(p => p[1])];
+  }
+
   onMount(() => {
     chart = new uPlot(opts(), [[], []], container);
+    if (!live && data) chart.setData(data);
   });
 
   onDestroy(() => chart?.destroy());
 
-  const unsub = liveBuffer.subscribe(buf => {
-    if (!chart || buf.count === 0 || !xKey || !yKey) return;
-    const n = buf.count;
-    const oldestIdx = n < MAX_POINTS ? 0 : buf.head;
-    const xs = new Array(n);
-    const ys = new Array(n);
-    for (let j = 0; j < n; j++) {
-      const idx = (oldestIdx + j) % MAX_POINTS;
-      xs[j] = buf.channels[xKey][idx];
-      ys[j] = buf.channels[yKey][idx];
-    }
-    // Sort by x for scatter rendering
-    const pairs = xs.map((x, i) => [x, ys[i]]).sort((a, b) => a[0] - b[0]);
-    chart.setData([pairs.map(p => p[0]), pairs.map(p => p[1])]);
-  });
+  // Live mode
+  const ctx = getContext('datasource');
+  const useLive = live && ctx?.mode !== 'playback';
 
-  onDestroy(unsub);
+  let unsub;
+  if (useLive) {
+    unsub = liveBuffer.subscribe(buf => {
+      if (!chart || buf.count === 0 || !xKey || !yKey) return;
+      const n = buf.count;
+      const oldest = n < MAX_POINTS ? 0 : buf.head;
+      const xs = new Array(n), ys = new Array(n);
+      for (let j = 0; j < n; j++) {
+        const idx = (oldest + j) % MAX_POINTS;
+        xs[j] = buf.channels[xKey][idx];
+        ys[j] = buf.channels[yKey][idx];
+      }
+      chart.setData(sortedPairs(xs, ys));
+    });
+  }
+  onDestroy(() => unsub?.());
+
+  // Static / playback mode
+  $: if (!useLive && data && chart) {
+    chart.setData(sortedPairs(data[0], data[1]));
+  }
 
   $: if (chart && (width || height)) chart.setSize({ width, height });
 </script>

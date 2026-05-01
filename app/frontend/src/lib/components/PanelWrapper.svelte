@@ -1,10 +1,11 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, getContext, onMount, onDestroy } from 'svelte';
   import TimeSeriesPanel from './panels/TimeSeriesPanel.svelte';
   import GaugePanel      from './panels/GaugePanel.svelte';
   import StatPanel       from './panels/StatPanel.svelte';
   import BarGaugePanel   from './panels/BarGaugePanel.svelte';
   import ScatterPanel    from './panels/ScatterPanel.svelte';
+  import { samplesForChannels } from '../playback.js';
 
   export let panel;
   export let editMode = false;
@@ -20,16 +21,32 @@
     scatter:    ScatterPanel,
   };
 
+  // Playback context — present when inside a RunDashboard, absent in live mode.
+  const dsCtx = getContext('datasource');
+  const isPlayback = dsCtx?.mode === 'playback';
+
+  // Subscribe to the run samples store so panel data stays reactive.
+  let runSamples = null;
+  let samplesUnsub;
+  if (isPlayback) {
+    samplesUnsub = dsCtx.samplesStore.subscribe(v => { runSamples = v; });
+  }
+  onDestroy(() => samplesUnsub?.());
+
+  // Channel-sliced data for time-series / scatter panels.
+  $: panelData = (isPlayback && runSamples)
+    ? samplesForChannels(runSamples, panel.channels)
+    : null;
+
   let wrapEl;
   let innerW = 400;
   let innerH = 200;
 
-  import { onMount } from 'svelte';
   onMount(() => {
     const ro = new ResizeObserver(entries => {
       for (const e of entries) {
         innerW = e.contentRect.width;
-        innerH = e.contentRect.height - 32; // 32 = title bar height
+        innerH = e.contentRect.height - 32;
       }
     });
     ro.observe(wrapEl);
@@ -72,6 +89,8 @@
         height={Math.max(40, innerH)}
         min={panel.min}
         max={panel.max}
+        live={!isPlayback}
+        data={panelData}
       />
     {:else}
       <div class="empty-panel">No channels configured</div>

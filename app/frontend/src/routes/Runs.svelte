@@ -1,17 +1,12 @@
 <script>
   import { onMount } from 'svelte';
   import { apiGet, apiDelete } from '../lib/ws.js';
-  import { CHANNEL_COLORS, channelLabel } from '../lib/colors.js';
-  import UPlotChart from '../lib/components/UPlotChart.svelte';
+  import RunDashboard from './RunDashboard.svelte';
 
   let runs = [];
   let loading = true;
   let error = '';
   let selectedRun = null;
-  let samples = null;
-  let samplesLoading = false;
-
-  const NUM_CH = 12;
 
   async function loadRuns() {
     loading = true; error = '';
@@ -24,47 +19,17 @@
     }
   }
 
-  async function selectRun(run) {
-    selectedRun = run;
-    samplesLoading = true;
-    samples = null;
-    try {
-      const raw = await apiGet(`/api/runs/${run.id}/samples`);
-      samples = buildUplotData(raw);
-    } catch (e) {
-      error = e.message;
-    } finally {
-      samplesLoading = false;
-    }
-  }
-
   async function deleteRun(run, e) {
     e.stopPropagation();
     if (!confirm(`Delete "${run.name}"?`)) return;
     try {
       await apiDelete(`/api/runs/${run.id}`);
-      if (selectedRun?.id === run.id) { selectedRun = null; samples = null; }
+      if (selectedRun?.id === run.id) selectedRun = null;
       await loadRuns();
     } catch (e) {
       error = e.message;
     }
   }
-
-  function buildUplotData(raw) {
-    if (!raw || raw.length === 0) return null;
-    const ts = raw.map(r => r.ts);
-    const channels = Array.from({ length: NUM_CH }, (_, i) => {
-      const key = `s_${String(i).padStart(2,'0')}`;
-      return raw.map(r => r[key] ?? null);
-    });
-    return [ts, ...channels];
-  }
-
-  const runSeries = Array.from({ length: NUM_CH }, (_, i) => ({
-    label: channelLabel(i),
-    stroke: CHANNEL_COLORS[i],
-    width: 1.5,
-  }));
 
   function fmtTime(ts) {
     if (!ts) return '—';
@@ -80,8 +45,12 @@
   onMount(loadRuns);
 </script>
 
-<div class="runs-page">
-  <div class="run-list">
+{#if selectedRun}
+  <!-- Full-screen run dashboard; back button returns to the list -->
+  <RunDashboard run={selectedRun} onBack={() => selectedRun = null} />
+{:else}
+  <!-- Run list ────────────────────────────────────────────────────────────── -->
+  <div class="runs-page">
     <div class="list-header">
       <h2>Saved Runs</h2>
       <button class="btn-ghost" on:click={loadRuns}>↻ Refresh</button>
@@ -97,116 +66,77 @@
       <ul>
         {#each runs as run}
           <li>
-            <button
-              class="run-item"
-              class:selected={selectedRun?.id === run.id}
-              on:click={() => selectRun(run)}
-            >
+            <button class="run-item" on:click={() => selectedRun = run}>
               <div class="run-name">{run.name}</div>
               <div class="run-meta">{fmtTime(run.started_at)} · {duration(run)}</div>
-              <span class="del" on:click|stopPropagation={(e) => deleteRun(run, e)} role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && deleteRun(run, e)} title="Delete">✕</span>
+              <span
+                class="del"
+                role="button"
+                tabindex="0"
+                on:click|stopPropagation={(e) => deleteRun(run, e)}
+                on:keydown={(e) => e.key === 'Enter' && deleteRun(run, e)}
+                title="Delete"
+              >✕</span>
             </button>
           </li>
         {/each}
       </ul>
     {/if}
   </div>
-
-  <div class="run-detail">
-    {#if !selectedRun}
-      <div class="empty">Select a run to view its data.</div>
-    {:else if samplesLoading}
-      <div class="empty">Loading samples…</div>
-    {:else if !samples}
-      <div class="empty">No samples in this run.</div>
-    {:else}
-      <h3>{selectedRun.name}</h3>
-      <p class="meta">{fmtTime(selectedRun.started_at)} → {fmtTime(selectedRun.ended_at)} · {duration(selectedRun)}</p>
-      <div class="chart-wrap">
-        <UPlotChart
-          data={samples}
-          series={runSeries}
-          width={820}
-          height={380}
-          live={false}
-        />
-      </div>
-    {/if}
-  </div>
-</div>
+{/if}
 
 <style>
   .runs-page {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    height: calc(100vh - 50px);
-    overflow: hidden;
-  }
-  .run-list {
-    border-right: 1px solid #2a2a4a;
-    overflow-y: auto;
-    padding: 12px;
+    padding: 16px;
+    max-width: 640px;
   }
   .list-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
   }
-  h2 { font-size: 0.9rem; color: #aaa; text-transform: uppercase; margin: 0; }
-  ul { list-style: none; padding: 0; margin: 0; }
+  h2 { font-size: 0.8rem; color: #666; text-transform: uppercase; margin: 0; letter-spacing: 0.06em; }
+
+  ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+
   .run-item {
+    width: 100%;
+    text-align: left;
     padding: 10px 12px;
     border-radius: 6px;
     cursor: pointer;
     position: relative;
-    margin-bottom: 4px;
-    border: 1px solid transparent;
+    border: 1px solid #1e1e38;
+    background: #12122a;
+    color: inherit;
+    transition: border-color 0.1s;
   }
-  .run-item:hover { background: #1e1e38; }
-  .run-item.selected { background: #1e1e38; border-color: #4FC3F7; }
-  .run-name { font-size: 0.9rem; color: #e0e0e0; }
-  .run-meta { font-size: 0.75rem; color: #666; margin-top: 2px; }
+  .run-item:hover { border-color: #4FC3F7; background: #1a1a38; }
+  .run-name { font-size: 0.88rem; color: #e0e0e0; }
+  .run-meta { font-size: 0.72rem; color: #555; margin-top: 2px; }
   .del {
     position: absolute;
-    right: 8px;
-    top: 50%;
+    right: 8px; top: 50%;
     transform: translateY(-50%);
-    background: none;
-    border: none;
-    color: #555;
+    color: #333;
     cursor: pointer;
-    font-size: 0.75rem;
-    padding: 2px 4px;
+    font-size: 0.7rem;
+    padding: 4px 6px;
+    border-radius: 3px;
   }
-  .del:hover { color: #e57373; }
-  .run-detail {
-    padding: 20px;
-    overflow-y: auto;
-  }
-  .empty {
-    color: #555;
-    margin-top: 60px;
-    text-align: center;
-    font-size: 0.9rem;
-  }
-  h3 { margin: 0 0 4px; color: #e0e0e0; }
-  .meta { font-size: 0.8rem; color: #666; margin: 0 0 16px; }
-  .chart-wrap {
-    background: #141428;
-    border-radius: 8px;
-    padding: 12px;
-    overflow-x: auto;
-  }
-  .muted { color: #555; font-size: 0.85rem; }
-  .err { color: #e57373; font-size: 0.85rem; }
+  .del:hover { color: #e57373; background: #1e1e38; }
+
+  .muted { color: #555; font-size: 0.82rem; }
+  .err   { color: #e57373; font-size: 0.82rem; }
   .btn-ghost {
     background: none;
-    border: 1px solid #3a3a5a;
-    color: #aaa;
+    border: 1px solid #2a2a4a;
+    color: #666;
     padding: 3px 8px;
     border-radius: 4px;
     cursor: pointer;
     font-size: 0.8rem;
   }
+  .btn-ghost:hover { border-color: #4a4a6a; color: #aaa; }
 </style>

@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, getContext } from 'svelte';
   import { liveValues } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
 
@@ -7,8 +7,11 @@
   export let min = -150;
   export let max = 150;
 
+  const ctx = getContext('datasource');
+  const valStore = ctx?.mode === 'playback' ? ctx.valuesStore : liveValues;
+
   let values = {};
-  const unsub = liveValues.subscribe(v => { values = v; });
+  const unsub = valStore.subscribe(v => { values = v; });
   onDestroy(unsub);
 
   function pct(v) {

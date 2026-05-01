@@ -1,4 +1,5 @@
 <script>
+  import { onDestroy, getContext } from 'svelte';
   import { liveValues } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
 
@@ -9,13 +10,14 @@
   const color = meta.color ?? '#4FC3F7';
   const unit  = meta.unit  ?? '';
 
-  // Configurable range — could be per-panel later
   export let min = -150;
   export let max = 150;
 
+  const ctx = getContext('datasource');
+  const valStore = ctx?.mode === 'playback' ? ctx.valuesStore : liveValues;
+
   let value = 0;
-  const unsub = liveValues.subscribe(v => { value = v[key] ?? 0; });
-  import { onDestroy } from 'svelte';
+  const unsub = valStore.subscribe(v => { value = v[key] ?? 0; });
   onDestroy(unsub);
 
   const SIZE   = 160;

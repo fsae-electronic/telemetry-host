@@ -1,13 +1,15 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, getContext } from 'svelte';
   import { liveValues } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
 
   export let channels = [];
 
-  // Show one big number per channel
+  const ctx = getContext('datasource');
+  const valStore = ctx?.mode === 'playback' ? ctx.valuesStore : liveValues;
+
   let values = {};
-  const unsub = liveValues.subscribe(v => { values = v; });
+  const unsub = valStore.subscribe(v => { values = v; });
   onDestroy(unsub);
 </script>
 

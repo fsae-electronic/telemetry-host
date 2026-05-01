@@ -1,0 +1,303 @@
+# FSAE Telemetry Host
+
+A self-contained telemetry dashboard for the FSAE eDrive car. Reads sensor data over serial (UART), displays it in a live configurable dashboard, and stores runs to a local database for post-session analysis.
+
+The entire application ships as a **single binary** — no Python, no Node, no installers. Users run one file and open a browser.
+
+---
+
+## Architecture
+
+```
+Serial (UART)
+  └─ COBS framing → MessagePack decode
+        └─ Go backend  ──WebSocket──▶  Browser UI (Svelte)
+              └─ SQLite (telemetry.db)       └─ uPlot charts
+```
+
+The Go binary embeds the compiled frontend at build time. On launch it serves the UI at `http://localhost:8080` and auto-opens it in the default browser.
+
+### Protocol
+Incoming frames from the car are **COBS-encoded MessagePack** dictionaries over UART at 115200 baud. Each frame is terminated with a `0x00` byte. The receiver side in `src/rx.py` documents the same protocol.
+
+### Sensor channels
+
+| Key | Sensor | Group |
+|-----|--------|-------|
+| `s_00` | Brake Sensor 1 | Brakes |
+| `s_01` | Brake Sensor 2 | Brakes |
+| `s_02` | Battery Level | Battery |
+| `s_03` | Steering Angle | Steering |
+| `s_04` | Accel Pedal 1 | Accelerator |
+| `s_05` | Accel Pedal 2 | Accelerator |
+| `s_06` | Brake Pedal 1 | Brake Pedal |
+| `s_07` | Brake Pedal 2 | Brake Pedal |
+| `s_08` | Motor Current FL | Motor Currents |
+| `s_09` | Motor Current FR | Motor Currents |
+| `s_10` | Motor Current RL | Motor Currents |
+| `s_11` | Motor Current RR | Motor Currents |
+
+---
+
+## Prerequisites
+
+### To build from source
+
+| Tool | Minimum version | Install |
+|------|----------------|---------|
+| Go | 1.21 | https://go.dev/dl |
+| Node.js | 18 | https://nodejs.org |
+| npm | 9 | bundled with Node |
+
+### To run a pre-built binary
+
+Nothing. Just the binary.
+
+### For the test environment (virtual serial loopback)
+
+```bash
+# Arch / Manjaro
+sudo pacman -S socat python python-pip
+
+# Ubuntu / Debian
+sudo apt install socat python3 python3-pip
+```
+
+Python dependencies for the mock transmitter:
+
+```bash
+pip install pyserial msgpack cobs
+```
+
+---
+
+## Building
+
+Both steps must be run from the `app/` directory.
+
+**Step 1 — build the frontend:**
+
+```bash
+cd app/frontend
+npm install
+npm run build
+```
+
+This compiles the Svelte app into `app/cmd/app/frontend/`, where the Go compiler picks it up via `go:embed`.
+
+**Step 2 — build the binary:**
+
+```bash
+cd app
+go build -o telemetry-host ./cmd/app/
+```
+
+### Cross-compiling for Windows
+
+From Linux, produce a Windows executable with no extra tools:
+
+```bash
+cd app
+GOOS=windows GOARCH=amd64 go build -o telemetry-host.exe ./cmd/app/
+```
+
+> The frontend must be built before either `go build`. The Go build embeds the compiled JS/CSS from `cmd/app/frontend/` at compile time — if that directory is missing the build will fail.
+
+---
+
+## Running
+
+```bash
+./telemetry-host
+```
+
+The app will log the URL and open it automatically:
+
+```
+telemetry host running at http://localhost:8080
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `8080` | HTTP server port |
+| `--db` | `telemetry.db` | Path to the SQLite database file |
+| `--no-open` | off | Skip auto-opening the browser |
+
+```bash
+./telemetry-host --port 9090 --db /data/season2025.db
+```
+
+### Linux serial port permissions
+
+On Linux, your user must be in the `dialout` group to access serial ports without `sudo`. This is a one-time setup:
+
+```bash
+sudo usermod -aG dialout $USER
+# log out and back in for it to take effect
+```
+
+---
+
+## Test environment (virtual serial loopback)
+
+Use the provided script to spin up the entire test environment in one command. It starts socat, the mock transmitter, and the telemetry host automatically, then connects them together.
+
+```bash
+cd app
+bash scripts/test-env.sh
+```
+
+The script will print the dashboard URL and the virtual port names, then stream all logs to the terminal. **Press Ctrl+C** to shut everything down cleanly.
+
+```
+Virtual serial link:  /dev/pts/5  ↔  /dev/pts/7
+Mock transmitter:     running on /dev/pts/7 at 10 Hz
+Serial connection:    connected to /dev/pts/5
+
+─────────────────────────────────────────────────
+  Dashboard:  http://localhost:8080
+  TX port:    /dev/pts/7  (mock transmitter)
+  RX port:    /dev/pts/5  (telemetry host)
+─────────────────────────────────────────────────
+  Press Ctrl+C to stop everything.
+```
+
+The browser opens automatically. The serial connection is made for you — data should be flowing into the dashboard immediately.
+
+### What the script does
+
+1. Starts `socat` to create a linked pair of virtual serial ports
+2. Starts `mock_tx.py` on one end, transmitting 12 channels of sine-wave data at 10 Hz
+3. Starts `./telemetry-host` and immediately connects it to the other end via the REST API
+
+### Prerequisites check
+
+The script will tell you if anything is missing before it starts:
+
+| Missing | Error shown | Fix |
+|---------|-------------|-----|
+| Binary not built | `binary not found` | `go build -o telemetry-host ./cmd/app/` |
+| socat not installed | `socat not found` | `sudo pacman -S socat` / `sudo apt install socat` |
+| Python deps missing | `Python dependencies missing` | `pip install pyserial msgpack cobs` |
+
+### Port field note
+
+The port dropdown auto-suggests real hardware serial ports (ttyUSB*, ttyACM*). Virtual PTY paths from socat won't appear there — that's normal. The script connects automatically. If you ever need to connect manually, type the path directly into the port field (e.g. `/dev/pts/5`).
+
+> On Windows with a real USB-serial adapter, replace the port field with `COM3` (or whichever port appears in Device Manager). The script is Linux-only; on Windows just run the binary directly and enter the COM port manually.
+
+---
+
+## Using the dashboard
+
+### Live view
+
+The default layout shows all sensor groups:
+
+- **Brake Sensors** — overlaid time series for both brake sensors
+- **Battery Level / Steering Angle** — arc gauges
+- **Accel Pedal / Brake Pedal** — horizontal bar gauges with live fill
+- **Motor Currents** — overlaid time series for all four drivers
+
+The chart scrolls a 30-second window of live data.
+
+### Editing the layout
+
+Click **⊹ Edit Layout** in the toolbar to enter edit mode:
+
+- **Move** — drag a panel by its title bar to reposition it on the grid
+- **Resize** — drag the **⊿** handle in the bottom-right corner
+- **Edit** — click **✎** to change a panel's type, channels, range, or size
+- **Remove** — click **✕** on a panel to delete it
+- **Add** — click **＋ Add Panel**, then configure:
+  - **Type**: Time Series, Gauge, Stat, Bar Gauge, or XY Scatter
+  - **Channels**: pick individually or click a group button to select all channels in that group
+  - **Range**: min/max values (used by Gauge and Bar Gauge)
+  - **Size**: width and height in grid units (grid is 12 columns wide, each row is 80 px)
+- **Reset** — click **↺ Reset** to restore the default layout
+
+Layout changes are saved automatically to `localStorage` in the browser and persist between sessions.
+
+### Panel types
+
+| Type | Best for |
+|------|----------|
+| Time Series | Any channel over time; supports multiple channels overlaid |
+| Gauge | Single channel with a min/max range — battery %, steering angle |
+| Stat | Large numeric readout, good for quick at-a-glance values |
+| Bar Gauge | Pedal positions, any 0–100% signal; multiple channels stack vertically |
+| XY Scatter | Correlation between two channels (select exactly 2) |
+
+### Recording a run
+
+1. Connect to the serial port
+2. Click **● Record** in the status bar — the button turns red and a blinking **REC** indicator appears
+3. Click **■ Stop** to end the recording
+
+Recorded runs are stored in `telemetry.db` and appear in the **Runs** tab. Click a run to load it into a chart. Runs can be deleted from the list.
+
+---
+
+## Project structure
+
+```
+app/
+├── cmd/app/
+│   ├── main.go              # Entry point — HTTP server, go:embed
+│   └── frontend/            # Compiled Svelte output (gitignored, built by npm)
+├── internal/
+│   ├── serial/
+│   │   ├── cobs.go          # COBS encode/decode
+│   │   └── serial.go        # Serial port manager, read loop, packet parser
+│   ├── hub/
+│   │   └── hub.go           # WebSocket broadcast hub
+│   ├── store/
+│   │   └── store.go         # SQLite run storage (pure Go, no system deps)
+│   └── api/
+│       └── api.go           # REST + WebSocket HTTP handlers
+├── frontend/                # Svelte source
+│   └── src/
+│       ├── lib/
+│       │   ├── channels.js  # Sensor names, groups, colors
+│       │   ├── dashboard.js # Dashboard layout store (localStorage)
+│       │   └── ws.js        # WebSocket client + ring buffer
+│       └── routes/
+│           ├── Dashboard.svelte
+│           └── Runs.svelte
+├── go.mod
+└── telemetry.db             # Created automatically on first run
+```
+
+---
+
+## REST API reference
+
+All endpoints are on `http://localhost:8080`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/ports` | List available serial ports |
+| `POST` | `/api/connect` | Connect: `{"port": "/dev/ttyUSB0", "baud": 115200}` |
+| `POST` | `/api/disconnect` | Disconnect (stops any active recording) |
+| `GET` | `/api/status` | Current connection + recording state |
+| `GET` | `/api/runs` | List all stored runs |
+| `POST` | `/api/runs` | Start recording: `{"name": "optional name"}` |
+| `POST` | `/api/runs/{id}/stop` | Stop recording |
+| `GET` | `/api/runs/{id}` | Get run metadata |
+| `GET` | `/api/runs/{id}/samples` | Get all samples for a run (JSON array) |
+| `DELETE` | `/api/runs/{id}` | Delete a run and all its samples |
+| `WS` | `/ws` | WebSocket — streams live packets and status updates |
+
+### WebSocket message format
+
+**Incoming packet** (from car):
+```json
+{ "type": "packet", "ts": 1714123456.789, "data": { "s_00": 12.3, "s_01": 11.9, ... } }
+```
+
+**Status update** (on connect/disconnect/record):
+```json
+{ "type": "status", "data": { "connected": true, "port": "/dev/pts/2", "recording": false, "active_run_id": 0 } }
+```

@@ -4,6 +4,7 @@
   import 'uplot/dist/uPlot.min.css';
   import { liveBuffer, MAX_POINTS } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
+  import { liveFaultEvents } from '../../ruleEngine.js';
 
   export let channels = [];
   export let width  = 400;
@@ -14,6 +15,25 @@
   // ─── playback context (present only inside RunDashboard) ───────────────────
   const dsCtx      = getContext('datasource');
   const isPlayback = dsCtx?.mode === 'playback';
+
+  // ─── fault event markers ───────────────────────────────────────────────────
+  let currentFaultEvents = [];  // { ts: seconds, rule }
+  let hoverFault         = null;
+  let hoverFaultCssX     = 0;
+
+  if (isPlayback && dsCtx?.faultEventsStore) {
+    const unsubFaults = dsCtx.faultEventsStore.subscribe(evts => {
+      currentFaultEvents = evts ?? [];
+      requestAnimationFrame(() => mainChart?.redraw(false));
+    });
+    onDestroy(unsubFaults);
+  } else {
+    const unsubFaults = liveFaultEvents.subscribe(evts => {
+      currentFaultEvents = evts ?? [];
+      requestAnimationFrame(() => mainChart?.redraw(false));
+    });
+    onDestroy(unsubFaults);
+  }
 
   // Mirror of the shared cursor timestamp — updated via subscription below.
   let sharedCursorTs    = null;
@@ -46,6 +66,42 @@
     c.lineTo(xPx, top + bh);
     c.stroke();
     c.restore();
+  }
+
+  // ─── fault marker drawing ──────────────────────────────────────────────────
+  function drawFaultMarkers(u) {
+    if (!currentFaultEvents.length) return;
+    const ctx = u.ctx;
+    const { left, top, width: bw, height: bh } = u.bbox;
+    const dpr  = window.devicePixelRatio || 1;
+    const SIZE = 4 * dpr;
+
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    for (const evt of currentFaultEvents) {
+      const xPx = u.valToPos(evt.ts, 'x', true); // canvas px
+      if (xPx < left - SIZE || xPx > left + bw + SIZE) continue;
+
+      const color = evt.rule.severity === 'critical' ? '#E57373' : '#FFB74D';
+      const baseY = top + bh;       // bottom edge of plot area
+      const tipY  = baseY - SIZE * 2.2;
+
+      // upward-pointing triangle sitting on the bottom edge
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(xPx,        tipY);
+      ctx.lineTo(xPx - SIZE, baseY);
+      ctx.lineTo(xPx + SIZE, baseY);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function fmtFaultTs(ts) {
+    const d = new Date(ts * 1000);
+    return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}.${Math.floor(d.getMilliseconds()/100)}`;
   }
 
   // ─── layout ────────────────────────────────────────────────────────────────
@@ -276,13 +332,30 @@
         }],
         // Hover/click in playback mode → seek all panels to this timestamp
         setCursor: [(u) => {
-          if (!isPlayback || !dsCtx?.seekToTs) return;
-          const idx = u.cursor.idx;
-          if (idx == null) return;
-          const ts = u.data?.[0]?.[idx];
-          if (ts != null) dsCtx.seekToTs(ts);
+          if (isPlayback && dsCtx?.seekToTs) {
+            const idx = u.cursor.idx;
+            if (idx != null) {
+              const ts = u.data?.[0]?.[idx];
+              if (ts != null) dsCtx.seekToTs(ts);
+            }
+          }
+          // Fault marker hover detection (CSS pixel space)
+          const cx = u.cursor.left;
+          if (cx != null && currentFaultEvents.length) {
+            let found = null;
+            let minDist = 9; // px threshold
+            for (const evt of currentFaultEvents) {
+              const ex = u.valToPos(evt.ts, 'x', false);
+              const d  = Math.abs(ex - cx);
+              if (d < minDist) { minDist = d; found = evt; }
+            }
+            hoverFault = found ?? null;
+            if (hoverFault) hoverFaultCssX = u.valToPos(hoverFault.ts, 'x', false);
+          } else {
+            hoverFault = null;
+          }
         }],
-        draw: [drawTrackers, drawSharedCursor],
+        draw: [drawTrackers, drawFaultMarkers, drawSharedCursor],
       },
     };
   }
@@ -362,6 +435,27 @@
       <button class="reset-btn" on:click={resetZoom} title="Reset zoom">↺ Reset</button>
     {/if}
     <div bind:this={mainEl}></div>
+
+    {#if hoverFault}
+      {@const r = hoverFault.rule}
+      <div
+        class="fault-tooltip"
+        style="left: {Math.min(hoverFaultCssX + 14, width - 218)}px;"
+      >
+        <div class="ft-header">
+          <span class="ft-dot ft-dot-{r.severity}"></span>
+          <span class="ft-ref">{r.rule_ref}</span>
+          <span class="ft-title">{r.title}</span>
+        </div>
+        <div class="ft-desc">{r.description}</div>
+        <div class="ft-row">
+          {#each r.sensors as s}
+            <span class="ft-chip">{s}</span>
+          {/each}
+          <span class="ft-ts">@ {fmtFaultTs(hoverFault.ts)}</span>
+        </div>
+      </div>
+    {/if}
   </div>
 
   <!-- ── minimap ────────────────────────────────────────────────────────── -->
@@ -455,6 +549,84 @@
     font-weight: 600;
   }
   .reset-btn:hover { background: #2a2a4a; }
+
+  /* ── fault tooltip ───────────────────────────────────────────────────────── */
+  .fault-tooltip {
+    position: absolute;
+    top: 8px;
+    z-index: 20;
+    background: #0e0e22;
+    border: 1px solid #3a3a5a;
+    border-radius: 5px;
+    padding: 7px 10px;
+    width: 210px;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    animation: ft-fade 0.1s ease;
+  }
+  @keyframes ft-fade {
+    from { opacity: 0; transform: translateY(-3px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .ft-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+  }
+  .ft-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .ft-dot-critical { background: #E57373; }
+  .ft-dot-warning  { background: #FFB74D; }
+  .ft-ref {
+    font-size: 0.65rem;
+    font-family: monospace;
+    color: #666;
+    padding: 1px 4px;
+    background: #1a1a32;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .ft-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #ddd;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ft-desc {
+    font-size: 0.7rem;
+    color: #777;
+    line-height: 1.4;
+    margin-bottom: 6px;
+  }
+  .ft-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .ft-chip {
+    font-size: 0.62rem;
+    font-family: monospace;
+    padding: 1px 4px;
+    background: #1a1a3a;
+    border: 1px solid #2a2a4a;
+    border-radius: 3px;
+    color: #4FC3F7;
+  }
+  .ft-ts {
+    margin-left: auto;
+    font-size: 0.65rem;
+    font-family: monospace;
+    color: #555;
+    white-space: nowrap;
+  }
 
   /* uPlot selection box styling */
   :global(.u-select) {

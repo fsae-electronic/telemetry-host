@@ -2,6 +2,8 @@
   import StatusBar  from './lib/components/StatusBar.svelte';
   import Dashboard  from './routes/Dashboard.svelte';
   import Runs       from './routes/Runs.svelte';
+  import Alerts     from './routes/Alerts.svelte';
+  import { activeAlerts } from './lib/ruleEngine.js';
 
   let page = 'dashboard';
 </script>
@@ -12,6 +14,12 @@
   <nav>
     <button class:active={page === 'dashboard'} on:click={() => page = 'dashboard'}>Dashboard</button>
     <button class:active={page === 'runs'}      on:click={() => page = 'runs'}>Runs</button>
+    <button class:active={page === 'alerts'}    on:click={() => page = 'alerts'} class="alerts-tab">
+      Alerts
+      {#if $activeAlerts.size > 0}
+        <span class="alert-badge">{$activeAlerts.size}</span>
+      {/if}
+    </button>
   </nav>
 
   <main>
@@ -19,6 +27,8 @@
       <Dashboard />
     {:else if page === 'runs'}
       <Runs />
+    {:else if page === 'alerts'}
+      <Alerts />
     {/if}
   </main>
 </div>
@@ -57,6 +67,24 @@
   }
   nav button:hover { color: #ccc; }
   nav button.active { color: #4FC3F7; border-bottom-color: #4FC3F7; }
+
+  .alerts-tab { position: relative; }
+  .alert-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #E57373;
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    border-radius: 8px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    margin-left: 5px;
+    vertical-align: middle;
+    line-height: 1;
+  }
 
   main { flex: 1; overflow: hidden; }
 </style>

@@ -4,15 +4,17 @@
   import { apiGet } from '../lib/ws.js';
   import { valuesAtIndex } from '../lib/playback.js';
   import { ALL_CHANNEL_KEYS } from '../lib/channels.js';
+  import { createRuleEvaluator } from '../lib/ruleEngine.js';
   import DashboardGrid from '../lib/components/DashboardGrid.svelte';
 
   export let run;
   export let onBack;
 
   // ── context stores ──────────────────────────────────────────────────────────
-  const samplesStore = writable(null);
-  const valuesStore  = writable({});
-  const cursorTs     = writable(null);   // shared timestamp for all panels
+  const samplesStore    = writable(null);
+  const valuesStore     = writable({});
+  const cursorTs        = writable(null);   // shared timestamp for all panels
+  const faultEventsStore = writable([]);    // { ts: seconds, rule } computed after load
 
   // ── binary search: find index of nearest timestamp ──────────────────────────
   function nearestIdx(arr, target) {
@@ -48,7 +50,26 @@
     valuesStore,
     cursorTs,
     seekToTs,
+    faultEventsStore,
   });
+
+  // Pre-compute all rule violations across the run's samples.
+  // Runs a fresh evaluator (no shared live state) in one forward pass.
+  function computePlaybackFaults(samples) {
+    const evaluator = createRuleEvaluator();
+    const events = [];
+    const ts = samples[0];
+    for (let i = 0; i < ts.length; i++) {
+      const values = {};
+      for (let j = 0; j < ALL_CHANNEL_KEYS.length; j++) {
+        const v = samples[j + 1][i];
+        if (v != null) values[ALL_CHANNEL_KEYS[j]] = v;
+      }
+      const { newFires } = evaluator.evaluate(values, ts[i] * 1000);
+      for (const f of newFires) events.push({ ts: ts[i], rule: f.rule });
+    }
+    return events;
+  }
 
   // ── load ────────────────────────────────────────────────────────────────────
   let loading = true;
@@ -63,7 +84,9 @@
       const ts      = raw.map(r => r.ts);
       const ordered = ALL_CHANNEL_KEYS.map(k => raw.map(r => r[k] ?? null));
       totalSamples  = ts.length;
-      samplesStore.set([ts, ...ordered]);
+      const allSamples = [ts, ...ordered];
+      samplesStore.set(allSamples);
+      faultEventsStore.set(computePlaybackFaults(allSamples));
       scrubTo(0);
     } catch (e) {
       error = e.message;

@@ -18,24 +18,23 @@ Serial (UART)
 The Go binary embeds the compiled frontend at build time. On launch it serves the UI at `http://localhost:8080` and auto-opens it in the default browser.
 
 ### Protocol
-Incoming frames from the car are **COBS-encoded MessagePack** dictionaries over UART at 115200 baud. Each frame is terminated with a `0x00` byte. The receiver side in `src/rx.py` documents the same protocol.
+Incoming frames are **COBS-encoded MessagePack** dictionaries over UART at 115200 baud. Each frame is terminated with a `0x00` byte. The receiver side in `src/rx.py` documents the same protocol. The real TMS570 Main ECU speaks a different, fixed-size binary frame natively -- `utils/tms570_bridge.py` translates between the two (see "Real hardware" below).
 
 ### Sensor channels
 
+Channel keys, labels, and grouping live in `frontend/src/lib/channels.js` (only keys defined there are selectable in the panel editor). As currently set up for the TMS570 Main ECU:
+
 | Key | Sensor | Group |
 |-----|--------|-------|
-| `s_00` | Brake Sensor 1 | Brakes |
-| `s_01` | Brake Sensor 2 | Brakes |
-| `s_02` | Battery Level | Battery |
-| `s_03` | Steering Angle | Steering |
-| `s_04` | Accel Pedal 1 | Accelerator |
-| `s_05` | Accel Pedal 2 | Accelerator |
-| `s_06` | Brake Pedal 1 | Brake Pedal |
-| `s_07` | Brake Pedal 2 | Brake Pedal |
-| `s_08` | Motor Current FL | Motor Currents |
-| `s_09` | Motor Current FR | Motor Currents |
-| `s_10` | Motor Current RL | Motor Currents |
-| `s_11` | Motor Current RR | Motor Currents |
+| `tps1`, `tps2` | Throttle position sensors | TPS |
+| `wheel_speed_fl`, `wheel_speed_fr` | Front wheel speed | Front Axle |
+| `steering_angle` | Steering angle | Front Axle |
+| `front_brake` | Front brake pressure | Front Axle |
+| `ac_current_1`, `ac_current_2`, `dc_current_1`, `dc_current_2` | Driver AC/DC currents | ADC Currents |
+| `rear_brake` | Rear brake pressure | Rear |
+| `drv1_*`, `drv2_*` | Motor driver PDOs (velocity, current, temps, status/warnings/error, control word) | Driver 1 / Driver 2 |
+
+The `drv1_*`/`drv2_*` fields only appear once a motor driver node is actually transmitting on the CAN bus -- the bridge omits fields for messages it hasn't seen rather than sending misleading zeros.
 
 ---
 
@@ -187,6 +186,27 @@ The script will tell you if anything is missing before it starts:
 The port dropdown auto-suggests real hardware serial ports (ttyUSB*, ttyACM*). Virtual PTY paths from socat won't appear there — that's normal. The script connects automatically. If you ever need to connect manually, type the path directly into the port field (e.g. `/dev/pts/5`).
 
 > On Windows with a real USB-serial adapter, replace the port field with `COM3` (or whichever port appears in Device Manager). The script is Linux-only; on Windows just run the binary directly and enter the COM port manually.
+
+---
+
+## Real hardware (TMS570 Main ECU)
+
+The Main ECU board (tms570_freertos_v2) sends its own fixed-size binary telemetry frame, not COBS/MessagePack directly -- `utils/tms570_bridge.py` decodes those frames and re-encodes them in the protocol above. `scripts/real-hw-env.sh` wires this up the same way `test-env.sh` does for the mock transmitter, just with the real board on one end instead of synthetic data:
+
+```bash
+cd app
+bash scripts/real-hw-env.sh /dev/ttyUSB0   # defaults to /dev/ttyUSB0 if omitted
+```
+
+This starts a socat virtual pair, points the bridge at the board's real serial port on one end, starts `telemetry-host`, and connects it to the other end automatically -- same log-everything-to-this-terminal, Ctrl+C-to-stop behavior as `test-env.sh`.
+
+To run the bridge by itself (e.g. against an already-running `telemetry-host` you connected manually to a socat/virtual port):
+
+```bash
+python3 utils/tms570_bridge.py -i /dev/ttyUSB0 -o /dev/pts/7
+```
+
+See the module docstring in `tms570_bridge.py` for the exact frame layout it expects -- keep it in lockstep with `vPackFrame()` in `tms570_freertos_v2/app/main.c` if that ever changes.
 
 ---
 

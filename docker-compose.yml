@@ -1,0 +1,10 @@
+services:
+  telemetry:
+    build: .
+    image: telemetry-host
+    container_name: telemetry-host
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    init: true

@@ -11,6 +11,8 @@ REPO_DIR="$(cd "$APP_DIR/.." && pwd)"
 MOCK_TX="$REPO_DIR/utils/mock_tx.py"
 BINARY="$APP_DIR/telemetry-host"
 RATE=10
+# Extra mock_tx.py flags, e.g. MOCK_ARGS=--faults to inject TPS and driver faults
+MOCK_ARGS="${MOCK_ARGS:-}"
 
 # ── sanity checks ────────────────────────────────────────────────────────────
 
@@ -33,9 +35,9 @@ if ! command -v socat &>/dev/null; then
   exit 1
 fi
 
-if ! python3 -c "import serial, msgpack, cobs" 2>/dev/null; then
+if ! python3 -c "import serial" 2>/dev/null; then
   echo "ERROR: Python dependencies missing."
-  echo "  pip install pyserial msgpack cobs"
+  echo "  pip install pyserial"
   exit 1
 fi
 
@@ -82,7 +84,8 @@ echo "Virtual serial link:  $PTY1  ↔  $PTY2"
 
 # ── start mock transmitter ───────────────────────────────────────────────────
 
-python3 "$MOCK_TX" -p "$PTY2" -r "$RATE" &
+# shellcheck disable=SC2086  # MOCK_ARGS is a list of flags
+python3 "$MOCK_TX" -p "$PTY2" -r "$RATE" $MOCK_ARGS &
 PIDS+=($!)
 sleep 0.3
 

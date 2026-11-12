@@ -2,23 +2,46 @@
   import StatusBar  from './lib/components/StatusBar.svelte';
   import Dashboard  from './routes/Dashboard.svelte';
   import Runs       from './routes/Runs.svelte';
+  import Health     from './routes/Health.svelte';
+  import Compare    from './routes/Compare.svelte';
+  import { page } from './lib/nav.js';
+  import { liveEvents } from './lib/ws.js';
 
-  let page = 'dashboard';
+  const TABS = [
+    ['dashboard', 'Dashboard'],
+    ['health',    'Health'],
+    ['runs',      'Runs'],
+    ['compare',   'Compare'],
+  ];
+
+  // Errors seen live while another tab is open, shown as a badge on Health.
+  let seenErrors = 0;
+  $: errorCount = $liveEvents.filter(e => e.level === 'error').length;
+  $: if ($page === 'health' || errorCount < seenErrors) seenErrors = errorCount;
+  $: unseenErrors = errorCount - seenErrors;
 </script>
 
 <div class="app">
   <StatusBar />
 
   <nav>
-    <button class:active={page === 'dashboard'} on:click={() => page = 'dashboard'}>Dashboard</button>
-    <button class:active={page === 'runs'}      on:click={() => page = 'runs'}>Runs</button>
+    {#each TABS as [key, label]}
+      <button class:active={$page === key} on:click={() => page.set(key)}>
+        {label}
+        {#if key === 'health' && unseenErrors > 0}<span class="badge">{unseenErrors}</span>{/if}
+      </button>
+    {/each}
   </nav>
 
   <main>
-    {#if page === 'dashboard'}
+    {#if $page === 'dashboard'}
       <Dashboard />
-    {:else if page === 'runs'}
+    {:else if $page === 'health'}
+      <Health />
+    {:else if $page === 'runs'}
       <Runs />
+    {:else if $page === 'compare'}
+      <Compare />
     {/if}
   </main>
 </div>
@@ -57,6 +80,14 @@
   }
   nav button:hover { color: #ccc; }
   nav button.active { color: #4FC3F7; border-bottom-color: #4FC3F7; }
+  .badge {
+    margin-left: 4px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: #c62828;
+    color: #fff;
+    font-size: 0.65rem;
+  }
 
   main { flex: 1; overflow: hidden; }
 </style>

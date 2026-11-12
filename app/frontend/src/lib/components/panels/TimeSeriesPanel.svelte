@@ -1,8 +1,9 @@
 <script>
   import { onMount, onDestroy, tick, getContext } from 'svelte';
+  import { get } from 'svelte/store';
   import uPlot from 'uplot';
   import 'uplot/dist/uPlot.min.css';
-  import { liveBuffer, MAX_POINTS } from '../../ws.js';
+  import { liveBuffer, liveMarkers, MAX_POINTS } from '../../ws.js';
   import { CHANNELS } from '../../channels.js';
 
   export let channels = [];
@@ -14,6 +15,10 @@
   // ─── playback context (present only inside RunDashboard) ───────────────────
   const dsCtx      = getContext('datasource');
   const isPlayback = dsCtx?.mode === 'playback';
+
+  // Declared first: the store subscriptions below run immediately and check it.
+  let mainEl;
+  let mainChart;
 
   // Mirror of the shared cursor timestamp — updated via subscription below.
   let sharedCursorTs    = null;
@@ -45,6 +50,39 @@
     c.moveTo(xPx, top);
     c.lineTo(xPx, top + bh);
     c.stroke();
+    c.restore();
+  }
+
+  // ─── markers ───────────────────────────────────────────────────────────────
+  // Run markers in playback, markers of the active recording in live mode.
+  let markers = [];
+  const unsubMarkers = (isPlayback ? dsCtx.markersStore : liveMarkers)?.subscribe(m => {
+    markers = m ?? [];
+    mainChart?.redraw(false);
+  });
+  onDestroy(() => unsubMarkers?.());
+
+  function drawMarkers(u) {
+    if (!markers.length) return;
+    const { left, top, width: bw, height: bh } = u.bbox;
+    const c = u.ctx;
+    c.save();
+    c.font = `${10 * devicePixelRatio}px system-ui, sans-serif`;
+    c.textBaseline = 'top';
+    for (const m of markers) {
+      const xPx = u.valToPos(m.ts, 'x', true);
+      if (xPx < left || xPx > left + bw) continue;
+      c.strokeStyle = 'rgba(255,213,79,0.8)';
+      c.lineWidth = 1;
+      c.beginPath();
+      c.moveTo(xPx, top);
+      c.lineTo(xPx, top + bh);
+      c.stroke();
+      if (m.label) {
+        c.fillStyle = 'rgba(255,213,79,0.95)';
+        c.fillText(m.label, xPx + 3, top + 2);
+      }
+    }
     c.restore();
   }
 
@@ -129,7 +167,38 @@
   // We distinguish user-initiated zoom from the live auto-scroll.
   let userZoomed = false;
 
+  // In playback every panel shares one x range (dsCtx.xRange): a zoom or pan
+  // made in one panel is published there and applied by all the others.
+  const sharedRange = isPlayback ? dsCtx.xRange : null;
+  let userScaleChange = false;   // the next x setScale comes from this panel's user
+  let applyingShared  = false;   // setScale call made to follow sharedRange
+
+  function publishRange() {
+    if (!sharedRange || applyingShared || !mainChart) return;
+    sharedRange.set({ min: mainChart.scales.x.min, max: mainChart.scales.x.max });
+  }
+
+  const unsubRange = sharedRange?.subscribe(r => {
+    if (!mainChart) return;
+    if (r == null) {
+      if (userZoomed) applyReset();
+      return;
+    }
+    const { min, max } = mainChart.scales.x;
+    if (Math.abs(min - r.min) < 1e-6 && Math.abs(max - r.max) < 1e-6) return;
+    applyingShared = true;
+    userZoomed = true;
+    mainChart.setScale('x', r);
+    applyingShared = false;
+  });
+  onDestroy(() => unsubRange?.());
+
   function resetZoom() {
+    if (sharedRange) sharedRange.set(null);
+    else applyReset();
+  }
+
+  function applyReset() {
     userZoomed = false;
     if (!live && currentData?.[0]?.length) {
       const xs = currentData[0];
@@ -219,6 +288,7 @@
       if (newMin < xMin) { newMin = xMin; newMax = xMin + span; }
       if (newMax > xMax) { newMax = xMax; newMin = xMax - span; }
       mainChart.setScale('x', { min: newMin, max: newMax });
+      publishRange();
     }
     function up() {
       window.removeEventListener('pointermove', move);
@@ -230,8 +300,6 @@
   }
 
   // ─── uPlot main chart ────────────────────────────────────────────────────────
-  let mainEl;
-  let mainChart;
   let currentData = data ?? [[], ...channels.map(() => [])];
 
   function buildSeries() {
@@ -247,7 +315,12 @@
     return {
       width: w,
       height: h,
-      cursor: { show: true, drag: { x: true, y: false, uni: 50 } },
+      cursor: {
+        show: true,
+        drag: { x: true, y: false, uni: 50 },
+        // Hovering one panel shows the cursor at the same time in all of them.
+        sync: { key: isPlayback ? 'playback' : 'live', setSeries: false },
+      },
       legend: { show: false },
       select: { show: true },
       scales: { x: { time: false } },
@@ -267,10 +340,18 @@
       series: [{}, ...buildSeries()],
       hooks: {
         setSelect: [(u) => {
-          if (u.select.width > 0) userZoomed = true;
+          if (u.select.width > 0) {
+            userZoomed = true;
+            userScaleChange = true;
+            requestAnimationFrame(() => { userScaleChange = false; });
+          }
         }],
         setScale: [(u, key) => {
           if (key !== 'x') return;
+          if (userScaleChange) {
+            userScaleChange = false;
+            publishRange();
+          }
           computeStats(u.data);
           if (userZoomed) requestAnimationFrame(drawMinimap);
         }],
@@ -282,7 +363,7 @@
           const ts = u.data?.[0]?.[idx];
           if (ts != null) dsCtx.seekToTs(ts);
         }],
-        draw: [drawTrackers, drawSharedCursor],
+        draw: [drawTrackers, drawMarkers, drawSharedCursor],
       },
     };
   }
@@ -327,6 +408,14 @@
   $: if (!live && data && mainChart) {
     currentData = data;
     mainChart.setData(data);
+    // setData resets the x scale; keep following the shared zoom if there is one.
+    const r = sharedRange && get(sharedRange);
+    if (r) {
+      applyingShared = true;
+      userZoomed = true;
+      mainChart.setScale('x', r);
+      applyingShared = false;
+    }
     computeStats(data);
     requestAnimationFrame(drawMinimap);
   }

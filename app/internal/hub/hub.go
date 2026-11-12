@@ -34,11 +34,12 @@ func (h *Hub) Register(conn *websocket.Conn) {
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 
-	go c.writePump(func() {
+	unregister := func() {
 		h.mu.Lock()
 		delete(h.clients, c)
 		h.mu.Unlock()
-	})
+	}
+	go c.writePump(unregister)
 
 	// Keep connection alive
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -47,13 +48,24 @@ func (h *Hub) Register(conn *websocket.Conn) {
 		return nil
 	})
 
+	// A read error means the page went away: drop the client right away so
+	// Clients() reflects it, and close the connection to end the write pump.
 	go func() {
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				break
 			}
 		}
+		unregister()
+		conn.Close()
 	}()
+}
+
+// Clients returns the number of connected WebSocket clients (open UI windows).
+func (h *Hub) Clients() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
 }
 
 // Broadcast sends a packet to all connected clients as JSON.
@@ -79,11 +91,16 @@ func (h *Hub) Broadcast(p serial.Packet) {
 
 // BroadcastStatus sends a status update to all clients.
 func (h *Hub) BroadcastStatus(status any) {
+	h.BroadcastMsg("status", status)
+}
+
+// BroadcastMsg sends {"type": typ, "data": data} to all clients.
+func (h *Hub) BroadcastMsg(typ string, data any) {
 	type wsMsg struct {
 		Type string `json:"type"`
 		Data any    `json:"data"`
 	}
-	msg, err := json.Marshal(wsMsg{Type: "status", Data: status})
+	msg, err := json.Marshal(wsMsg{Type: typ, Data: data})
 	if err != nil {
 		return
 	}

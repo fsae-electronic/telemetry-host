@@ -11,6 +11,8 @@
   let values = {};
   const unsub = valStore.subscribe(v => { values = v; });
   onDestroy(unsub);
+
+  const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(2);
 </script>
 
 <div class="stat-wrap">
@@ -18,7 +20,7 @@
     {@const meta = CHANNELS[key] ?? {}}
     <div class="stat-item" style="--color: {meta.color ?? '#4FC3F7'}">
       <div class="stat-label">{meta.name ?? key}</div>
-      <div class="stat-value">{(values[key] ?? 0).toFixed(2)}</div>
+      <div class="stat-value">{fmt(values[key] ?? 0)}</div>
       <div class="stat-unit">{meta.unit ?? ''}</div>
     </div>
   {/each}

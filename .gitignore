@@ -9,3 +9,4 @@ telemetry.db
 telemetry.db-journal
 telemetry.db-wal
 telemetry.db-shm
+data/

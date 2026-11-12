@@ -1,5 +1,5 @@
 # Mock Transmitter
-A simulated MCU transmitter. It generates oscillating sensor data (12 channels), packs it into a MessagePack dictionary, frames it with COBS, and transmits it over a serial port.
+A mock main ECU. It transmits telemetry frames v3 over a serial port exactly as `telemetry.c` does: fast frames (130 bytes) at 10 Hz and slow frames (60 bytes) at 1 Hz, with CRC, oscillating values, and the fields the real ECU cannot fill yet left at 0 (see `app/README.md`). For a scenario that exercises every field and event, use the app's built-in **SIMULATOR** port instead.
 
 To test the scripts without physical hardware, you need `socat` to create virtual serial loopback devices.
 
@@ -29,5 +29,5 @@ python3 mock_tx.py -p <second socat port>-v -r 10
     * `-p, --port`: Serial port to transmit on
     * `-b, --baud`: Baud rate (default: `115200`)
     * `-r, --rate`: Transmission rate in Hertz (default: `10.0`)
-    * `-v, --verbose`: Verbose output
     * `-d, --debug`: Enable logging (prints raw hex bytes)
+    * `-f, --faults`: Every 20 s, inject 1 s of TPS implausibility and a 2 s fault on driver L

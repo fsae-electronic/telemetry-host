@@ -1,7 +1,7 @@
 import { ALL_CHANNEL_KEYS } from './channels.js';
 
 /**
- * Given the full run samples (uPlot format: [ts[], s_00[], ..., s_11[]])
+ * Given the full run samples (uPlot format: [ts[], ch0[], ..., chN[]], ordered by ALL_CHANNEL_KEYS)
  * and a sample index, return a key→value map for point-in-time panels.
  */
 export function valuesAtIndex(samples, idx) {

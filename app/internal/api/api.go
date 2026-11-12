@@ -32,6 +32,18 @@ func New(sm *serial.Manager, h *hub.Hub, st *store.Store) *Server {
 	return &Server{serial: sm, hub: h, store: st}
 }
 
+// Shutdown ends any active recording and closes the serial port, so a run is
+// not left without an end time when the app quits.
+func (s *Server) Shutdown() {
+	s.mu.Lock()
+	if s.activeRunID != 0 {
+		s.store.StopRun(s.activeRunID, nowTs())
+		s.activeRunID = 0
+	}
+	s.mu.Unlock()
+	s.serial.Disconnect()
+}
+
 // Routes registers all API routes on mux.
 func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws", s.handleWS)
@@ -56,6 +68,31 @@ func (s *Server) ConsumePackets() {
 		}
 
 		s.hub.Broadcast(p)
+	}
+}
+
+// BroadcastLinkStats pushes the serial link counters to all clients once per
+// second as {"type": "link"}. Should be called in its own goroutine.
+func (s *Server) BroadcastLinkStats() {
+	type linkPayload struct {
+		Connected bool    `json:"connected"`
+		RateHz    float64 `json:"rate_hz"` // frames decoded in the last interval
+		serial.LinkStats
+	}
+	const interval = time.Second
+	var prev uint64
+	for range time.Tick(interval) {
+		st := s.serial.Stats()
+		if st.Frames < prev { // counters reset by a reconnect
+			prev = 0
+		}
+		rate := float64(st.Frames-prev) / interval.Seconds()
+		prev = st.Frames
+		s.hub.BroadcastMsg("link", linkPayload{
+			Connected: s.serial.Connected(),
+			RateHz:    rate,
+			LinkStats: st,
+		})
 	}
 }
 
@@ -152,15 +189,16 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		// Start recording
-		var body struct {
-			Name string `json:"name"`
-		}
+		var body store.Run
 		json.NewDecoder(r.Body).Decode(&body)
 		if body.Name == "" {
 			body.Name = fmt.Sprintf("Run %s", time.Now().Format("2006-01-02 15:04:05"))
 		}
-		ts := float64(time.Now().UnixMilli()) / 1000.0
-		id, err := s.store.CreateRun(body.Name, ts)
+		if s.serial.PortName() == serial.SimulatorPort {
+			body.Name = "[SIM] " + body.Name // keep simulated runs apart from real ones
+		}
+		body.StartedAt = nowTs()
+		id, err := s.store.CreateRun(body)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -177,7 +215,8 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRunsID(w http.ResponseWriter, r *http.Request) {
-	// Path: /api/runs/{id} or /api/runs/{id}/stop or /api/runs/{id}/samples
+	// Path: /api/runs/{id}, /api/runs/{id}/stop, /api/runs/{id}/samples,
+	// /api/runs/{id}/markers or /api/runs/{id}/markers/{markerID}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/runs/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
@@ -228,8 +267,32 @@ func (s *Server) handleRunsID(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, samples)
 
+	case "markers":
+		s.handleMarkers(w, r, id, parts[2:])
+
 	case "":
 		switch r.Method {
+		case http.MethodPatch:
+			var p store.RunPatch
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+				jsonError(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if err := s.store.UpdateRun(id, p); err != nil {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			run, err := s.store.GetRun(id)
+			if err != nil {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if run == nil {
+				http.NotFound(w, r)
+				return
+			}
+			jsonOK(w, run)
+
 		case http.MethodGet:
 			run, err := s.store.GetRun(id)
 			if err != nil {
@@ -263,6 +326,96 @@ func (s *Server) handleRunsID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleMarkers serves /api/runs/{runID}/markers[/{markerID}].
+// rest holds the path segments after "markers".
+func (s *Server) handleMarkers(w http.ResponseWriter, r *http.Request, runID int64, rest []string) {
+	if len(rest) == 0 || rest[0] == "" {
+		switch r.Method {
+		case http.MethodGet:
+			markers, err := s.store.ListMarkers(runID)
+			if err != nil {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if markers == nil {
+				markers = []store.Marker{}
+			}
+			jsonOK(w, markers)
+
+		case http.MethodPost:
+			// ts defaults to now, so a live marker lands on the current sample.
+			var body struct {
+				Ts    *float64 `json:"ts"`
+				Label string   `json:"label"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				jsonError(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			ts := nowTs()
+			if body.Ts != nil {
+				ts = *body.Ts
+			}
+			run, err := s.store.GetRun(runID)
+			if err != nil {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if run == nil {
+				http.NotFound(w, r)
+				return
+			}
+			m, err := s.store.AddMarker(runID, ts, body.Label)
+			if err != nil {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			jsonOK(w, m)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	markerID, err := strconv.ParseInt(rest[0], 10, 64)
+	if err != nil {
+		jsonError(w, "invalid marker id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		var body struct {
+			Ts    *float64 `json:"ts"`
+			Label *string  `json:"label"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		ok, err := s.store.UpdateMarker(runID, markerID, body.Ts, body.Label)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		jsonOK(w, map[string]any{"updated": true})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteMarker(runID, markerID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]any{"deleted": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 type statusPayload struct {
 	Connected   bool   `json:"connected"`
 	Port        string `json:"port"`
@@ -285,6 +438,8 @@ func (s *Server) currentStatus() statusPayload {
 func (s *Server) broadcastStatus() {
 	s.hub.BroadcastStatus(s.currentStatus())
 }
+
+func nowTs() float64 { return float64(time.Now().UnixMilli()) / 1000.0 }
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

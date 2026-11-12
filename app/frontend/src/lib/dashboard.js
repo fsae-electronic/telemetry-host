@@ -10,54 +10,81 @@ export const PANEL_TYPES = {
 };
 
 // Grid is 12 columns wide; row height is 80px.
+const DRIVER_STATS = ['motor_velocity', 'target_torque', 'driver_temp', 'motor_temp', 'driver_dc_voltage', 'heartbeat_state'];
+
 const DEFAULT_PANELS = [
+  {
+    id: 'p-tps',
+    type: 'timeseries',
+    title: 'Pedal',
+    channels: ['tps1', 'tps2'],
+    col: 1, row: 1, cols: 3, rows: 4,
+  },
+  // Separate from the pedal: torque is in ‰ (0–1000), the pedal in % (0–100).
+  {
+    id: 'p-torque',
+    type: 'timeseries',
+    title: 'Torque',
+    channels: ['torque_request', 'torque_cmd_l', 'torque_cmd_r'],
+    col: 4, row: 1, cols: 3, rows: 4,
+  },
   {
     id: 'p-brakes',
     type: 'timeseries',
-    title: 'Brake Sensors',
-    channels: ['s_00', 's_01'],
-    col: 1, row: 1, cols: 6, rows: 4,
+    title: 'Brakes',
+    channels: ['front_brake', 'rear_brake'],
+    col: 7, row: 1, cols: 6, rows: 4,
   },
   {
-    id: 'p-battery',
-    type: 'gauge',
-    title: 'Battery Level',
-    channels: ['s_02'],
-    col: 7, row: 1, cols: 3, rows: 4,
-  },
-  {
-    id: 'p-steering',
-    type: 'gauge',
-    title: 'Steering Angle',
-    channels: ['s_03'],
-    col: 10, row: 1, cols: 3, rows: 4,
-  },
-  {
-    id: 'p-accel',
-    type: 'bargauge',
-    title: 'Accelerator Pedal',
-    channels: ['s_04', 's_05'],
-    col: 1, row: 5, cols: 3, rows: 3,
-  },
-  {
-    id: 'p-brakeped',
-    type: 'bargauge',
-    title: 'Brake Pedal',
-    channels: ['s_06', 's_07'],
-    col: 4, row: 5, cols: 3, rows: 3,
+    id: 'p-wheels',
+    type: 'timeseries',
+    title: 'Wheel Speeds',
+    channels: ['wheel_speed_fl', 'wheel_speed_fr'],
+    col: 1, row: 5, cols: 6, rows: 4,
   },
   {
     id: 'p-currents',
     type: 'timeseries',
-    title: 'Motor Currents',
-    channels: ['s_08', 's_09', 's_10', 's_11'],
-    col: 7, row: 5, cols: 6, rows: 3,
+    title: 'Currents',
+    channels: ['ac_current_1', 'ac_current_2', 'dc_current_1', 'dc_current_2'],
+    col: 7, row: 5, cols: 6, rows: 4,
+  },
+  {
+    id: 'p-driver0',
+    type: 'stat',
+    title: 'Driver L',
+    channels: DRIVER_STATS.map(f => 'drv0_' + f),
+    col: 1, row: 9, cols: 6, rows: 3,
+  },
+  {
+    id: 'p-driver1',
+    type: 'stat',
+    title: 'Driver R',
+    channels: DRIVER_STATS.map(f => 'drv1_' + f),
+    col: 7, row: 9, cols: 6, rows: 3,
+  },
+  {
+    id: 'p-steering',
+    type: 'timeseries',
+    title: 'Steering Angle',
+    channels: ['steering_angle'],
+    col: 1, row: 12, cols: 6, rows: 3,
+  },
+  {
+    id: 'p-status',
+    type: 'stat',
+    title: 'Frame / Driver Status',
+    channels: ['valid_mask', 'calibration_type', 'drv0_error', 'drv1_error', 'drv0_warnings', 'drv1_warnings'],
+    col: 7, row: 12, cols: 6, rows: 3,
   },
 ];
 
+// Bump when channel keys change so stale saved layouts are ignored.
+const STORAGE_KEY = 'telemetry-dashboard-v2';
+
 function load() {
   try {
-    const raw = localStorage.getItem('telemetry-dashboard');
+    const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch {}
   return DEFAULT_PANELS;
@@ -67,7 +94,7 @@ function createDashboard() {
   const { subscribe, set, update } = writable(load());
 
   function save(panels) {
-    localStorage.setItem('telemetry-dashboard', JSON.stringify(panels));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(panels));
   }
 
   return {

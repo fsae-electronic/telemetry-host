@@ -1,0 +1,6 @@
+**/node_modules
+app/cmd/app/frontend
+app/telemetry-host
+app/telemetry-host.exe
+**/telemetry.db*
+.git

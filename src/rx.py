@@ -1,95 +1,91 @@
-import serial
-import msgpack
+"""Telemetry v3 receiver: reads main-ECU frames from a serial port and logs them.
+
+Scrolling log counterpart of v3view.py. Frame format and decoding live in
+v3frame.py (a port of app/internal/serial/frame.go).
+"""
 import argparse
 import logging
-from cobs import cobs
+import time
+
+import serial
+
+from v3frame import HDR, LAYOUTS, TYPE_FAST, Parser, decode_payload, fmt_val
 
 logger = logging.getLogger(__name__)
 
-def receive_packet(ser):
-    """
-    Waits for, reads, and decodes a single COBS-framed MessagePack packet.
-    Returns the unpacked dictionary, or None if the frame was empty or corrupted.
-    """
-    raw_frame = ser.read_until(b'\x00')
-    
-    if not raw_frame or raw_frame == b'\x00':
-        return None
+TYPE_NAMES = {TYPE_FAST: "fast", 2: "slow"}
+STATS_PERIOD = 5.0  # s
 
-    # Only spend time formatting the hex string if debug logging is actually on
-    if logger.isEnabledFor(logging.DEBUG):
-        hex_dump = ' '.join(f'{b:02X}' for b in raw_frame)
-        logger.debug(f"Raw frame: {hex_dump}")
 
-    try:
-        # Strip the 0x00 delimiter
-        frame_to_decode = raw_frame[:-1]
-        
-        msgpack_payload = cobs.decode(frame_to_decode)
-        unpacked_data = msgpack.unpackb(msgpack_payload)
-        
-        if isinstance(unpacked_data, dict):
-            return unpacked_data
-        else:
-            logger.debug("Unpacked data is not a dictionary.")
-            return None
-
-    except cobs.DecodeError:
-        logger.debug("Dropped packet: Corrupted COBS frame.")
-        return None
-    except msgpack.exceptions.ExtraData:
-        logger.debug("Dropped packet: Invalid Msgpack payload.")
-        return None
-    except Exception as e:
-        logger.debug(f"Unexpected error: {e}")
-        return None
+def hex_dump(b):
+    return ' '.join(f'{x:02X}' for x in b)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Framed Msgpack Telemetry Receiver")
-    parser.add_argument('-p', '--port', type=str, default='/dev/ttyUSB0', 
+    parser = argparse.ArgumentParser(description="Telemetry v3 receiver")
+    parser.add_argument('-p', '--port', type=str, default='/dev/ttyUSB0',
                         help='Serial port to listen on (default: /dev/ttyUSB0)')
-    parser.add_argument('-b', '--baud', type=int, default=115200, 
+    parser.add_argument('-b', '--baud', type=int, default=115200,
                         help='Baud rate (default: 115200)')
-    parser.add_argument('-v', '--verbose', action='store_true', 
-                        help='Print formatted sensor data as it arrives')
-    parser.add_argument('-d', '--debug', action='store_true', 
-                        help='Enable debug logging (prints raw bytes and errors)')
-    
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Print every decoded field of each frame')
+    parser.add_argument('-d', '--debug', action='store_true',
+                        help='Enable debug logging (prints raw frames and rejected bytes)')
     args = parser.parse_args()
 
-    # Set the logging level based on the argparse flag
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    
-    # Configure the format for the console output
     logging.basicConfig(
-        level=log_level,
+        level=logging.DEBUG if args.debug else logging.INFO,
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%H:%M:%S'
     )
 
-    logger.info(f"Starting Framed Msgpack receiver on {args.port} at {args.baud} baud...")
-    
+    logger.info(f"Starting telemetry v3 receiver on {args.port} at {args.baud} baud...")
+    p = Parser()
+    counts = {}
+
     try:
-        with serial.Serial(args.port, args.baud, timeout=1) as ser:
+        with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
             logger.info("Device successfully opened and ready. Listening for data...")
-            
+            next_stats = time.monotonic() + STATS_PERIOD
+
             while True:
-                # The function signature is now completely clean
-                packet = receive_packet(ser)
-                
-                # We can still use standard print for the actual data payload if verbose is set,
-                # keeping it cleanly separated from the system log messages.
-                if packet and args.verbose:
-                    print("\n--- Valid Sensor Packet ---")
-                    for sensor_name, value in packet.items():
-                        key_str = sensor_name.decode('utf-8') if isinstance(sensor_name, bytes) else sensor_name
-                        print(f"  {key_str}: {value:.2f}")
-                        
+                data = ser.read(ser.in_waiting or 1)
+                before = (p.discarded, p.rejected, p.crc_errors, p.lost)
+
+                for typ, seq, t_ms, frame in p.feed(data) if data else []:
+                    name = TYPE_NAMES.get(typ, f"type {typ}")
+                    counts[name] = counts.get(name, 0) + 1
+                    logger.debug(f"Raw {name} frame ({len(frame)} B): {hex_dump(frame)}")
+                    if args.verbose and typ in LAYOUTS:
+                        fields = decode_payload(typ, frame[HDR:-2])
+                        print(f"\n--- {name} frame  seq {seq}  ecu_time {t_ms / 1000:.3f} s ---")
+                        for key, (raw, val, scale) in fields.items():
+                            print(f"  {key:<26} {fmt_val(key, raw, val, scale):>12}")
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    d_disc, d_rej, d_crc, d_lost = (a - b for a, b in zip(
+                        (p.discarded, p.rejected, p.crc_errors, p.lost), before))
+                    if d_crc:
+                        logger.debug(f"Dropped {d_crc} frame(s): CRC mismatch.")
+                    if d_rej - d_crc:
+                        logger.debug(f"Rejected {d_rej - d_crc} false sync(s).")
+                    if d_disc - d_rej:
+                        logger.debug(f"Discarded {d_disc - d_rej} byte(s) while hunting for sync.")
+                    if d_lost:
+                        logger.debug(f"Sequence gap: {d_lost} frame(s) lost.")
+
+                now = time.monotonic()
+                if now >= next_stats:
+                    got = ', '.join(f"{n} {k}" for k, n in sorted(counts.items())) or "no frames"
+                    logger.info(f"Link: {got} | crc_err {p.crc_errors} lost {p.lost} "
+                                f"rejected {p.rejected} discarded {p.discarded} B")
+                    next_stats = now + STATS_PERIOD
+
     except serial.SerialException as e:
         logger.error(f"Failed to open serial port: {e}")
     except KeyboardInterrupt:
         logger.info("Receiver stopped by user.")
+
 
 if __name__ == '__main__':
     main()
